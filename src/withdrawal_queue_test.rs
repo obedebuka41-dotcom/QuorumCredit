@@ -216,17 +216,16 @@ mod withdrawal_queue_tests {
         );
     }
 
-    // ── withdraw_vouch queuing ────────────────────────────────────────────────
+    // ── withdraw_vouch ────────────────────────────────────────────────
 
     #[test]
-    fn test_withdraw_vouch_queues_during_active_loan() {
+    #[should_panic(expected = "ActiveLoanExists")]
+    fn test_withdraw_vouch_panics_during_active_loan() {
         let s = setup();
         disburse_loan(&s);
 
+        // withdraw_vouch should panic when loan is active (per design spec)
         s.client.withdraw_vouch(&s.voucher, &s.borrower);
-
-        let queue = s.client.get_withdrawal_queue(&s.borrower);
-        assert_eq!(queue.len(), 1, "withdraw_vouch should queue during active loan");
     }
 
     #[test]
@@ -245,6 +244,9 @@ mod withdrawal_queue_tests {
             10_000_000,
             "full stake should be returned immediately when no active loan"
         );
+
+        let vouches = s.client.get_vouches(&s.borrower);
+        assert_eq!(vouches.len(), 0, "vouch should be removed after withdrawal");
     }
 
     // ── get_withdrawal_queue ──────────────────────────────────────────────────

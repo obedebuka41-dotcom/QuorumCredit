@@ -8,7 +8,7 @@ use crate::types::{
     BridgeRecord, DataKey, QueuedWithdrawal, VouchHistoryEntry, VouchRecord,
     PARTIAL_WITHDRAWAL_MAX_BPS, PARTIAL_WITHDRAWAL_PENALTY_BPS, BPS_DENOMINATOR,
 };
-use soroban_sdk::{symbol_short, token, Address, Env, Vec};
+use soroban_sdk::{panic_with_error, symbol_short, token, Address, Env, Vec};
 
 struct VouchConfig {
     whitelist_enabled: bool,
@@ -442,7 +442,7 @@ pub fn decrease_stake(
 }
 
 /// Fully withdraw a vouch and return stake to voucher.
-/// If borrower has an active loan, queues the withdrawal instead.
+/// Only allowed before a loan is active; panics if loan exists.
 pub fn withdraw_vouch(
     env: Env,
     voucher: Address,
@@ -451,34 +451,49 @@ pub fn withdraw_vouch(
     voucher.require_auth();
     require_not_paused(&env)?;
 
+    // Check if borrower has an active loan - panic with ActiveLoanExists
+    let active_loan_id: Option<u64> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ActiveLoan(borrower.clone()));
+    if active_loan_id.is_some() {
+        panic_with_error!(&env, ContractError::ActiveLoanExists);
+    }
+
+    // Load vouches - panic with NoVouchesForBorrower if absent or empty
     let vouches: Vec<VouchRecord> = env
         .storage()
         .persistent()
         .get(&DataKey::Vouches(borrower.clone()))
-        .ok_or(ContractError::NoVouchesForBorrower)?;
+        .unwrap_or(Vec::new(&env));
 
+    // Find the voucher's position - panic with VoucherNotFound if no match
     let idx = vouches
         .iter()
         .position(|v| v.voucher == voucher)
         .ok_or(ContractError::VoucherNotFound)? as u32;
 
     let vouch_rec = vouches.get(idx).unwrap();
-
-    // If active loan: queue the withdrawal
-    if has_active_loan(&env, &borrower) {
-        return queue_withdrawal_internal(&env, voucher, borrower, vouch_rec.token, false, 0);
-    }
-
-    // No active loan: execute immediately
-    let token_client = require_allowed_token(&env, &vouch_rec.token)?;
     let stake = vouch_rec.stake;
+    let token = vouch_rec.token.clone();
+
+    // Remove the vouch record
     let mut vouches_mut = vouches;
     vouches_mut.remove(idx);
 
-    env.storage()
-        .persistent()
-        .set(&DataKey::Vouches(borrower.clone()), &vouches_mut);
+    // If vouches empty, remove the key; otherwise write updated
+    if vouches_mut.is_empty() {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Vouches(borrower.clone()));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Vouches(borrower.clone()), &vouches_mut);
+    }
 
+    // Transfer stake back to voucher
+    let token_client = token::Client::new(&env, &token);
     token_client.transfer(&env.current_contract_address(), &voucher, &stake);
 
     env.events().publish(
